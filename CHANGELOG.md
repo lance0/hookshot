@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Interactive TUI mode (`--tui` flag) with bubbletea
+- Live request stream display in TUI
+- Request detail view with headers and body
+- Catppuccin Mocha color theme (cute pastel colors)
 - Auth tokens for private relays (`--token` flag)
 - YAML config file support (`--config` or auto-discovered hookshot.yaml)
 - Multiple local targets via route-based path matching

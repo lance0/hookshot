@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/lance0/hookshot/internal/protocol"
+	"github.com/lance0/hookshot/internal/tui"
 )
 
 const (
@@ -32,6 +33,7 @@ type Config struct {
 	TunnelID  string  // Optional: requested tunnel ID
 	Token     string  // Optional: auth token
 	Verbose   bool    // Show request/response bodies
+	TUIMode   bool    // Enable TUI mode
 }
 
 // Client is the hookshot tunnel client
@@ -42,6 +44,10 @@ type Client struct {
 	conn      *websocket.Conn
 	tunnelID  string
 	publicURL string
+
+	// TUI mode channels
+	tuiRequestCh chan<- tui.RequestItem
+	tuiConnCh    chan<- tui.ConnectionInfo
 }
 
 // New creates a new client
@@ -208,6 +214,16 @@ func (c *Client) connect(ctx context.Context) error {
 	c.publicURL = registered.PublicURL
 	c.display.LogConnected(c.tunnelID, c.publicURL)
 
+	// Send connection info to TUI if enabled
+	if c.tuiConnCh != nil {
+		c.tuiConnCh <- tui.ConnectionInfo{
+			TunnelID:  c.tunnelID,
+			PublicURL: c.publicURL,
+			Target:    c.config.Target,
+			Connected: true,
+		}
+	}
+
 	return nil
 }
 
@@ -261,8 +277,12 @@ func (c *Client) handleRequest(ctx context.Context, req *protocol.HTTPRequest) {
 
 	// Forward the request
 	resp, err := c.forwarder.Forward(ctx, req)
+	duration := time.Since(start)
+
+	var errMsg string
 	if err != nil {
 		c.display.LogError(req, err)
+		errMsg = err.Error()
 		// Send error response
 		resp = &protocol.HTTPResponse{
 			RequestID:  req.ID,
@@ -271,7 +291,29 @@ func (c *Client) handleRequest(ctx context.Context, req *protocol.HTTPRequest) {
 			Body:       []byte(fmt.Sprintf("Failed to forward: %v", err)),
 		}
 	} else {
-		c.display.LogResponse(req, resp, time.Since(start))
+		c.display.LogResponse(req, resp, duration)
+	}
+
+	// Send to TUI if enabled
+	if c.tuiRequestCh != nil {
+		tuiReq := tui.RequestItem{
+			ID:         req.ID,
+			Method:     req.Method,
+			Path:       req.Path,
+			StatusCode: resp.StatusCode,
+			Duration:   duration,
+			Timestamp:  time.Now(),
+			ReqHeaders: req.Headers,
+			ReqBody:    req.Body,
+			ResHeaders: resp.Headers,
+			ResBody:    resp.Body,
+			Error:      errMsg,
+		}
+		select {
+		case c.tuiRequestCh <- tuiReq:
+		default:
+			// Don't block if channel is full
+		}
 	}
 
 	// Send response back
@@ -288,4 +330,15 @@ func (c *Client) GetTunnelID() string {
 // GetPublicURL returns the public URL
 func (c *Client) GetPublicURL() string {
 	return c.publicURL
+}
+
+// SetTUIChannels sets channels for TUI communication
+func (c *Client) SetTUIChannels(reqCh chan<- tui.RequestItem, connCh chan<- tui.ConnectionInfo) {
+	c.tuiRequestCh = reqCh
+	c.tuiConnCh = connCh
+}
+
+// GetTarget returns the target URL
+func (c *Client) GetTarget() string {
+	return c.config.Target
 }

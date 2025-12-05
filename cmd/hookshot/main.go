@@ -9,10 +9,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fatih/color"
 	"github.com/lance0/hookshot/internal/client"
 	"github.com/lance0/hookshot/internal/config"
 	"github.com/lance0/hookshot/internal/server"
+	"github.com/lance0/hookshot/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -130,6 +132,7 @@ var clientCmd = &cobra.Command{
 		tunnelID, _ := cmd.Flags().GetString("id")
 		token, _ := cmd.Flags().GetString("token")
 		verbose, _ := cmd.Flags().GetBool("verbose")
+		tuiMode, _ := cmd.Flags().GetBool("tui")
 
 		var routes []client.Route
 
@@ -173,6 +176,7 @@ var clientCmd = &cobra.Command{
 			TunnelID:  tunnelID,
 			Token:     token,
 			Verbose:   verbose,
+			TUIMode:   tuiMode,
 		}
 
 		c := client.New(cfg)
@@ -185,12 +189,45 @@ var clientCmd = &cobra.Command{
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigCh
-			fmt.Println("\nShutting down...")
+			if !tuiMode {
+				fmt.Println("\nShutting down...")
+			}
 			cancel()
 		}()
 
+		if tuiMode {
+			// Run with TUI
+			return runWithTUI(ctx, c, cancel)
+		}
+
 		return c.Run(ctx)
 	},
+}
+
+// runWithTUI runs the client with the TUI
+func runWithTUI(ctx context.Context, c *client.Client, cancel context.CancelFunc) error {
+	// Create TUI model
+	m := tui.NewModel()
+
+	// Set up TUI channels
+	c.SetTUIChannels(m.RequestChannel(), m.ConnectionChannel())
+
+	// Run client in background
+	go func() {
+		if err := c.Run(ctx); err != nil && ctx.Err() == nil {
+			// Client error - could send to TUI
+		}
+	}()
+
+	// Run TUI
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("TUI error: %w", err)
+	}
+
+	// TUI exited, cancel context
+	cancel()
+	return nil
 }
 
 // Requests command
@@ -339,6 +376,7 @@ func init() {
 	clientCmd.Flags().String("id", "", "Requested tunnel ID (optional)")
 	clientCmd.Flags().String("token", "", "Auth token for server")
 	clientCmd.Flags().BoolP("verbose", "v", false, "Show request/response bodies")
+	clientCmd.Flags().Bool("tui", false, "Enable interactive TUI mode")
 
 	// Requests flags
 	requestsCmd.Flags().StringP("server", "s", "", "Server URL")
