@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -42,6 +44,7 @@ type Client struct {
 	forwarder *Forwarder
 	display   *Display
 	conn      *websocket.Conn
+	connMu    sync.Mutex // Protects conn for concurrent writes
 	tunnelID  string
 	publicURL string
 
@@ -231,6 +234,11 @@ func (c *Client) connect(ctx context.Context) error {
 
 // runLoop handles incoming messages
 func (c *Client) runLoop(ctx context.Context) error {
+	// Create a connection-scoped context that cancels when this connection ends
+	// This ensures request handler goroutines don't outlive the connection
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
@@ -260,13 +268,15 @@ func (c *Client) runLoop(ctx context.Context) error {
 			if err := msg.ParsePayload(&req); err != nil {
 				continue
 			}
-			go c.handleRequest(ctx, &req)
+			go c.handleRequest(connCtx, &req)
 
 		case protocol.TypePing:
 			// Respond with pong
 			pongMsg, _ := protocol.NewMessage(protocol.TypePong, nil)
 			data, _ := json.Marshal(pongMsg)
-			c.conn.WriteMessage(websocket.TextMessage, data)
+			if err := c.writeMessage(websocket.TextMessage, data); err != nil {
+				return fmt.Errorf("pong write error: %w", err)
+			}
 		}
 	}
 }
@@ -314,14 +324,18 @@ func (c *Client) handleRequest(ctx context.Context, req *protocol.HTTPRequest) {
 		select {
 		case c.tuiRequestCh <- tuiReq:
 		default:
-			// Don't block if channel is full
+			// Channel full - log at debug level to avoid spam
+			// This indicates TUI can't keep up with request volume
+			log.Printf("[debug] TUI channel full, dropped request display for %s %s", req.Method, req.Path)
 		}
 	}
 
 	// Send response back
 	msg, _ := protocol.NewMessage(protocol.TypeResponse, resp)
 	data, _ := json.Marshal(msg)
-	c.conn.WriteMessage(websocket.TextMessage, data)
+	if err := c.writeMessage(websocket.TextMessage, data); err != nil {
+		c.display.LogError(req, fmt.Errorf("failed to send response: %w", err))
+	}
 }
 
 // GetTunnelID returns the current tunnel ID
@@ -343,4 +357,20 @@ func (c *Client) SetTUIChannels(reqCh chan<- tui.RequestItem, connCh chan<- tui.
 // GetTarget returns the target URL
 func (c *Client) GetTarget() string {
 	return c.config.Target
+}
+
+// writeMessage safely writes a message to the WebSocket connection
+func (c *Client) writeMessage(messageType int, data []byte) error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+
+	if err := c.conn.WriteMessage(messageType, data); err != nil {
+		log.Printf("websocket write error: %v", err)
+		return err
+	}
+	return nil
 }

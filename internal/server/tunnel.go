@@ -22,12 +22,28 @@ const (
 
 // Tunnel represents a connected client tunnel
 type Tunnel struct {
-	ID        string
+	ID        string // Full UUID for security
 	conn      *websocket.Conn
 	send      chan []byte
 	pending   map[string]chan *protocol.HTTPResponse // requestID -> response channel
 	pendingMu sync.Mutex
 	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// ShortID returns the first 8 characters for display purposes
+func (t *Tunnel) ShortID() string {
+	if len(t.ID) >= 8 {
+		return t.ID[:8]
+	}
+	return t.ID
+}
+
+// Close signals the tunnel to shut down (safe to call multiple times)
+func (t *Tunnel) Close() {
+	t.closeOnce.Do(func() {
+		close(t.done)
+	})
 }
 
 // TunnelRegistry manages active tunnels
@@ -45,18 +61,14 @@ func NewTunnelRegistry(store *RequestStore) *TunnelRegistry {
 	}
 }
 
-// Register registers a new tunnel with optional requested ID
+// Register registers a new tunnel (always generates server-side ID for security)
 func (r *TunnelRegistry) Register(conn *websocket.Conn, requestedID string) (*Tunnel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	tunnelID := requestedID
-	if tunnelID == "" {
-		tunnelID = uuid.New().String()[:8]
-	} else if _, exists := r.tunnels[tunnelID]; exists {
-		// Requested ID is taken, generate a new one
-		tunnelID = uuid.New().String()[:8]
-	}
+	// Always generate full UUID server-side for security
+	// Client-requested IDs are ignored to prevent ID guessing attacks
+	tunnelID := uuid.New().String()
 
 	tunnel := &Tunnel{
 		ID:      tunnelID,
@@ -75,9 +87,10 @@ func (r *TunnelRegistry) Unregister(tunnelID string) {
 	defer r.mu.Unlock()
 
 	if tunnel, ok := r.tunnels[tunnelID]; ok {
-		close(tunnel.done)
-		close(tunnel.send)
+		tunnel.Close() // Signal shutdown via done channel
 		delete(r.tunnels, tunnelID)
+		// Note: send channel is NOT closed here to avoid panics
+		// WritePump will exit when done is closed and drain remaining messages
 	}
 }
 
@@ -87,6 +100,19 @@ func (r *TunnelRegistry) Get(tunnelID string) (*Tunnel, bool) {
 	defer r.mu.RUnlock()
 	t, ok := r.tunnels[tunnelID]
 	return t, ok
+}
+
+// CloseAll gracefully closes all active tunnels
+func (r *TunnelRegistry) CloseAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for id, tunnel := range r.tunnels {
+		log.Printf("closing tunnel: %s", tunnel.ShortID())
+		tunnel.Close()
+		tunnel.conn.Close()
+		delete(r.tunnels, id)
+	}
 }
 
 // ForwardRequest sends a request through the tunnel and waits for response
@@ -192,14 +218,14 @@ func (t *Tunnel) ReadPump(registry *TunnelRegistry) {
 		_, message, err := t.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("tunnel %s read error: %v", t.ID, err)
+				log.Printf("tunnel %s read error: %v", t.ShortID(), err)
 			}
 			return
 		}
 
 		var msg protocol.Message
 		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("tunnel %s: failed to parse message: %v", t.ID, err)
+			log.Printf("tunnel %s: failed to parse message: %v", t.ShortID(), err)
 			continue
 		}
 
@@ -207,7 +233,7 @@ func (t *Tunnel) ReadPump(registry *TunnelRegistry) {
 		case protocol.TypeResponse:
 			var resp protocol.HTTPResponse
 			if err := msg.ParsePayload(&resp); err != nil {
-				log.Printf("tunnel %s: failed to parse response: %v", t.ID, err)
+				log.Printf("tunnel %s: failed to parse response: %v", t.ShortID(), err)
 				continue
 			}
 			t.HandleResponse(&resp)
@@ -215,7 +241,7 @@ func (t *Tunnel) ReadPump(registry *TunnelRegistry) {
 		case protocol.TypePong:
 			// Client responded to ping, connection is alive
 		default:
-			log.Printf("tunnel %s: unknown message type: %s", t.ID, msg.Type)
+			log.Printf("tunnel %s: unknown message type: %s", t.ShortID(), msg.Type)
 		}
 	}
 }

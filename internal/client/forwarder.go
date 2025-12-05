@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/lance0/hookshot/internal/protocol"
@@ -63,11 +65,14 @@ func (f *Forwarder) Forward(ctx context.Context, req *protocol.HTTPRequest) (*pr
 	// Resolve target based on path
 	target := f.resolveTarget(req.Path)
 
-	// Build the full URL
-	url := target + req.Path
+	// Build the full URL using proper URL parsing
+	fullURL, err := buildURL(target, req.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build URL: %w", err)
+	}
 
 	// Create the HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, req.Method, url, bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequestWithContext(ctx, req.Method, fullURL, bytes.NewReader(req.Body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -111,6 +116,29 @@ func (f *Forwarder) Forward(ctx context.Context, req *protocol.HTTPRequest) (*pr
 		Headers:    headers,
 		Body:       body,
 	}, nil
+}
+
+// buildURL properly joins a base URL with a path, handling edge cases
+func buildURL(baseURL, path string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+
+	// Ensure path starts with /
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	// Parse the path (which may include query string)
+	pathURL, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	// Resolve the path against the base
+	resolved := base.ResolveReference(pathURL)
+	return resolved.String(), nil
 }
 
 // isHopByHop returns true if the header is a hop-by-hop header

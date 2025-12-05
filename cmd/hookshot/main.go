@@ -57,6 +57,13 @@ var serverCmd = &cobra.Command{
 			}
 		}
 
+		// Validate config file if loaded
+		if fileCfg != nil {
+			if err := fileCfg.Server.Validate(); err != nil {
+				return fmt.Errorf("invalid server config: %w", err)
+			}
+		}
+
 		// Get values from flags, fall back to config file
 		port, _ := cmd.Flags().GetInt("port")
 		host, _ := cmd.Flags().GetString("host")
@@ -102,7 +109,20 @@ var serverCmd = &cobra.Command{
 		}
 
 		srv := server.New(cfg)
-		return srv.Run()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Handle interrupt
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Println("\nShutting down...")
+			cancel()
+		}()
+
+		return srv.Run(ctx)
 	},
 }
 
@@ -124,6 +144,13 @@ var clientCmd = &cobra.Command{
 			fileCfg, err = config.Load(configFile)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
+			}
+		}
+
+		// Validate config file if loaded
+		if fileCfg != nil {
+			if err := fileCfg.Client.Validate(); err != nil {
+				return fmt.Errorf("invalid client config: %w", err)
 			}
 		}
 

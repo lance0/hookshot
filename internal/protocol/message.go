@@ -38,6 +38,7 @@ type RegisteredPayload struct {
 // HTTPRequest represents an incoming webhook request to be forwarded
 type HTTPRequest struct {
 	ID        string            `json:"id"`
+	TunnelID  string            `json:"tunnel_id,omitempty"` // For ownership verification
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Headers   map[string]string `json:"headers"`

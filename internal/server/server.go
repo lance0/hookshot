@@ -17,14 +17,22 @@ import (
 
 // Config holds server configuration
 type Config struct {
-	Port        int
-	Host        string
-	PublicURL   string
-	MaxRequests int
-	Token       string // Optional: require this token for auth
-	TLSCert     string // Optional: path to TLS certificate
-	TLSKey      string // Optional: path to TLS key
+	Port           int
+	Host           string
+	PublicURL      string
+	MaxRequests    int
+	Token          string   // Optional: require this token for auth
+	TLSCert        string   // Optional: path to TLS certificate
+	TLSKey         string   // Optional: path to TLS key
+	MaxBodySize    int64    // Max webhook body size in bytes (default 10MB)
+	MaxMessageSize int64    // Max WebSocket message size in bytes (default 10MB)
+	AllowedOrigins []string // Optional: allowed WebSocket origins (empty = allow all for CLI clients)
 }
+
+const (
+	defaultMaxBodySize    = 10 * 1024 * 1024 // 10MB
+	defaultMaxMessageSize = 10 * 1024 * 1024 // 10MB
+)
 
 // Server is the hookshot relay server
 type Server struct {
@@ -36,21 +44,56 @@ type Server struct {
 
 // New creates a new server
 func New(cfg Config) *Server {
+	// Apply defaults
+	if cfg.MaxBodySize == 0 {
+		cfg.MaxBodySize = defaultMaxBodySize
+	}
+	if cfg.MaxMessageSize == 0 {
+		cfg.MaxMessageSize = defaultMaxMessageSize
+	}
+
 	store := NewRequestStore(cfg.MaxRequests)
-	return &Server{
+	s := &Server{
 		config:   cfg,
 		registry: NewTunnelRegistry(store),
 		store:    store,
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-			CheckOrigin:     func(r *http.Request) bool { return true },
-		},
 	}
+
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     s.checkOrigin,
+	}
+
+	return s
 }
 
-// Run starts the server
-func (s *Server) Run() error {
+// checkOrigin validates WebSocket connection origins
+func (s *Server) checkOrigin(r *http.Request) bool {
+	// If no origins configured, allow all (needed for CLI clients with no Origin header)
+	if len(s.config.AllowedOrigins) == 0 {
+		return true
+	}
+
+	origin := r.Header.Get("Origin")
+	// CLI clients typically don't send Origin header
+	if origin == "" {
+		return true
+	}
+
+	// Check against allowed origins
+	for _, allowed := range s.config.AllowedOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+
+	log.Printf("rejected WebSocket connection from origin: %s", origin)
+	return false
+}
+
+// Run starts the server with graceful shutdown support
+func (s *Server) Run(ctx context.Context) error {
 	r := mux.NewRouter()
 
 	// WebSocket endpoint for clients
@@ -82,14 +125,38 @@ func (s *Server) Run() error {
 		log.Printf("auth token required for connections")
 	}
 
-	// Use TLS if cert and key are provided
-	if s.config.TLSCert != "" && s.config.TLSKey != "" {
-		log.Printf("hookshot server listening on %s (TLS)", addr)
-		return http.ListenAndServeTLS(addr, s.config.TLSCert, s.config.TLSKey, r)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
 	}
 
-	log.Printf("hookshot server listening on %s", addr)
-	return http.ListenAndServe(addr, r)
+	// Start server in goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		if s.config.TLSCert != "" && s.config.TLSKey != "" {
+			log.Printf("hookshot server listening on %s (TLS)", addr)
+			errCh <- srv.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
+		} else {
+			log.Printf("hookshot server listening on %s", addr)
+			errCh <- srv.ListenAndServe()
+		}
+	}()
+
+	// Wait for context cancellation or server error
+	select {
+	case <-ctx.Done():
+		log.Printf("shutting down server...")
+		// Give 10 seconds to drain connections
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Close all tunnels gracefully
+		s.registry.CloseAll()
+
+		return srv.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
+	}
 }
 
 // authMiddleware checks for valid auth token
@@ -103,7 +170,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// checkAuth validates the auth token from Authorization header or query param
+// checkAuth validates the auth token from Authorization header only
 func (s *Server) checkAuth(r *http.Request) bool {
 	if s.config.Token == "" {
 		return true
@@ -119,11 +186,7 @@ func (s *Server) checkAuth(r *http.Request) bool {
 		}
 	}
 
-	// Check query param
-	if r.URL.Query().Get("token") == s.config.Token {
-		return true
-	}
-
+	// Query param tokens removed for security (leak risk in logs/proxies)
 	return false
 }
 
@@ -134,6 +197,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("websocket upgrade failed: %v", err)
 		return
 	}
+
+	// Set message size limit
+	conn.SetReadLimit(s.config.MaxMessageSize)
 
 	// Wait for register message
 	_, message, err := conn.ReadMessage()
@@ -190,13 +256,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	data, _ := json.Marshal(registeredMsg)
 	conn.WriteMessage(websocket.TextMessage, data)
 
-	log.Printf("tunnel registered: %s", tunnel.ID)
+	log.Printf("tunnel registered: %s", tunnel.ShortID())
 
 	// Start read/write pumps
 	go tunnel.WritePump()
 	tunnel.ReadPump(s.registry)
 
-	log.Printf("tunnel disconnected: %s", tunnel.ID)
+	log.Printf("tunnel disconnected: %s", tunnel.ShortID())
 }
 
 // handleWebhook handles incoming webhook requests
@@ -210,9 +276,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the request body
+	// Read the request body with size limit
+	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
@@ -229,6 +300,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Create the request
 	req := &protocol.HTTPRequest{
 		ID:        uuid.New().String()[:8],
+		TunnelID:  tunnelID,
 		Method:    r.Method,
 		Path:      path,
 		Headers:   protocol.HeadersFromHTTP(r.Header),
@@ -245,8 +317,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := tunnel.ForwardRequest(ctx, req)
 	if err != nil {
-		log.Printf("forward error for %s: %v", req.ID, err)
-		http.Error(w, "failed to forward request", http.StatusBadGateway)
+		log.Printf("[%s] forward error (tunnel=%s, method=%s, path=%s): %v",
+			req.ID, tunnel.ShortID(), req.Method, req.Path, err)
+		http.Error(w, fmt.Sprintf("failed to forward request (id=%s)", req.ID), http.StatusBadGateway)
 		return
 	}
 
@@ -287,9 +360,16 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify the request belongs to this tunnel
+	if req.TunnelID != tunnelID {
+		http.Error(w, "request not found", http.StatusNotFound)
+		return
+	}
+
 	// Create a new request with a new ID for replay
 	replayReq := &protocol.HTTPRequest{
 		ID:        uuid.New().String()[:8],
+		TunnelID:  tunnelID,
 		Method:    req.Method,
 		Path:      req.Path,
 		Headers:   req.Headers,
@@ -306,8 +386,9 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := tunnel.ForwardRequest(ctx, replayReq)
 	if err != nil {
-		log.Printf("replay error for %s: %v", replayReq.ID, err)
-		http.Error(w, "failed to replay request", http.StatusBadGateway)
+		log.Printf("[%s] replay error (tunnel=%s, original=%s): %v",
+			replayReq.ID, tunnel.ShortID(), requestID, err)
+		http.Error(w, fmt.Sprintf("failed to replay request (id=%s)", replayReq.ID), http.StatusBadGateway)
 		return
 	}
 

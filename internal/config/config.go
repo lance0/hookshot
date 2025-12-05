@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,76 @@ func (c *ClientConfig) MatchRoute(path string) string {
 
 	// Fall back to default target
 	return c.Target
+}
+
+// Validate validates the server configuration
+func (c *ServerConfig) Validate() error {
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("invalid port: %d (must be 0-65535)", c.Port)
+	}
+
+	if c.PublicURL != "" {
+		if _, err := url.Parse(c.PublicURL); err != nil {
+			return fmt.Errorf("invalid public_url: %w", err)
+		}
+	}
+
+	// TLS cert and key must both be set or both be empty
+	if (c.TLSCert != "") != (c.TLSKey != "") {
+		return fmt.Errorf("both tls_cert and tls_key must be set, or neither")
+	}
+
+	// If TLS files are specified, verify they exist
+	if c.TLSCert != "" {
+		if _, err := os.Stat(c.TLSCert); err != nil {
+			return fmt.Errorf("tls_cert file not found: %s", c.TLSCert)
+		}
+	}
+	if c.TLSKey != "" {
+		if _, err := os.Stat(c.TLSKey); err != nil {
+			return fmt.Errorf("tls_key file not found: %s", c.TLSKey)
+		}
+	}
+
+	if c.MaxRequests < 0 {
+		return fmt.Errorf("invalid max_requests: %d (must be >= 0)", c.MaxRequests)
+	}
+
+	return nil
+}
+
+// Validate validates the client configuration
+func (c *ClientConfig) Validate() error {
+	if c.Server != "" {
+		u, err := url.Parse(c.Server)
+		if err != nil {
+			return fmt.Errorf("invalid server URL: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "ws" && u.Scheme != "wss" {
+			return fmt.Errorf("invalid server URL scheme: %s (must be http, https, ws, or wss)", u.Scheme)
+		}
+	}
+
+	if c.Target != "" {
+		if _, err := url.Parse(c.Target); err != nil {
+			return fmt.Errorf("invalid target URL: %w", err)
+		}
+	}
+
+	// Validate routes
+	for i, route := range c.Routes {
+		if route.Path == "" {
+			return fmt.Errorf("route %d: path is required", i)
+		}
+		if route.Target == "" {
+			return fmt.Errorf("route %d: target is required", i)
+		}
+		if _, err := url.Parse(route.Target); err != nil {
+			return fmt.Errorf("route %d: invalid target URL: %w", i, err)
+		}
+	}
+
+	return nil
 }
 
 // Example config file content
