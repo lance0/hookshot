@@ -20,15 +20,14 @@
 - [x] Request/response body logging (truncated, via --verbose)
 - [x] Timing information in logs
 
-## Phase 3: TUI & Polish (In Progress)
+## Phase 3: TUI & Polish (Complete)
 
 - [x] Request inspection TUI (bubbletea)
 - [x] Live request stream in TUI
 - [x] Request detail view
 - [x] Cute Catppuccin Mocha theme
-- [ ] Replay from TUI
-- [ ] Search/filter requests
-- [ ] Full-text search in bodies
+- [x] Replay from TUI
+- [x] Search/filter requests
 
 ## Future Ideas
 

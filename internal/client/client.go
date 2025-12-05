@@ -220,6 +220,8 @@ func (c *Client) connect(ctx context.Context) error {
 			TunnelID:  c.tunnelID,
 			PublicURL: c.publicURL,
 			Target:    c.config.Target,
+			ServerURL: c.config.ServerURL,
+			Token:     c.config.Token,
 			Connected: true,
 		}
 	}

@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -31,6 +33,8 @@ type ConnectionInfo struct {
 	TunnelID  string
 	PublicURL string
 	Target    string
+	ServerURL string
+	Token     string
 	Connected bool
 }
 
@@ -46,6 +50,12 @@ type Model struct {
 	connection    ConnectionInfo
 	ready         bool
 	quitting      bool
+	statusMsg     string
+	statusTime    time.Time
+
+	// Filter mode
+	filterMode  bool
+	filterInput string
 
 	// Channels for communication
 	requestCh chan RequestItem
@@ -77,6 +87,11 @@ func (m *Model) ConnectionChannel() chan<- ConnectionInfo {
 type requestMsg RequestItem
 type connectionMsg ConnectionInfo
 type tickMsg time.Time
+type replayResultMsg struct {
+	success   bool
+	requestID string
+	message   string
+}
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
@@ -105,12 +120,92 @@ func (m Model) tick() tea.Cmd {
 	})
 }
 
+func (m Model) replayRequest(requestID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.connection.ServerURL == "" || m.connection.TunnelID == "" {
+			return replayResultMsg{success: false, requestID: requestID, message: "Not connected"}
+		}
+
+		url := fmt.Sprintf("%s/api/tunnels/%s/requests/%s/replay",
+			m.connection.ServerURL, m.connection.TunnelID, requestID)
+
+		req, err := http.NewRequest("POST", url, nil)
+		if err != nil {
+			return replayResultMsg{success: false, requestID: requestID, message: err.Error()}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if m.connection.Token != "" {
+			req.Header.Set("Authorization", "Bearer "+m.connection.Token)
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return replayResultMsg{success: false, requestID: requestID, message: err.Error()}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return replayResultMsg{success: false, requestID: requestID, message: fmt.Sprintf("Server returned %d", resp.StatusCode)}
+		}
+
+		var result struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return replayResultMsg{success: true, requestID: requestID, message: "Replayed"}
+		}
+
+		return replayResultMsg{success: true, requestID: requestID, message: fmt.Sprintf("Replayed → %s", result.RequestID)}
+	}
+}
+
+// filteredRequests returns requests matching the current filter
+func (m Model) filteredRequests() []RequestItem {
+	if m.filterInput == "" {
+		return m.requests
+	}
+	filter := strings.ToLower(m.filterInput)
+	var filtered []RequestItem
+	for _, req := range m.requests {
+		if strings.Contains(strings.ToLower(req.Path), filter) ||
+			strings.Contains(strings.ToLower(req.Method), filter) ||
+			strings.Contains(req.ID, filter) {
+			filtered = append(filtered, req)
+		}
+	}
+	return filtered
+}
+
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle filter mode input
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterInput = ""
+				m.selected = 0
+			case tea.KeyEnter:
+				m.filterMode = false
+			case tea.KeyBackspace:
+				if len(m.filterInput) > 0 {
+					m.filterInput = m.filterInput[:len(m.filterInput)-1]
+					m.selected = 0
+				}
+			default:
+				if msg.Type == tea.KeyRunes {
+					m.filterInput += string(msg.Runes)
+					m.selected = 0
+				}
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			m.quitting = true
@@ -122,12 +217,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, m.keys.Down):
-			if m.selected < len(m.requests)-1 {
+			filtered := m.filteredRequests()
+			if m.selected < len(filtered)-1 {
 				m.selected++
 			}
 
+		case key.Matches(msg, m.keys.Filter):
+			m.filterMode = true
+
+		case key.Matches(msg, m.keys.Clear):
+			m.filterInput = ""
+			m.selected = 0
+
 		case key.Matches(msg, m.keys.Replay):
-			// TODO: Implement replay
+			filtered := m.filteredRequests()
+			if len(filtered) > 0 && m.selected < len(filtered) {
+				req := filtered[m.selected]
+				m.statusMsg = fmt.Sprintf("Replaying %s...", req.ID)
+				m.statusTime = time.Now()
+				cmds = append(cmds, m.replayRequest(req.ID))
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -165,11 +274,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Refresh for relative timestamps
 		cmds = append(cmds, m.tick())
+		// Clear status message after 3 seconds
+		if m.statusMsg != "" && time.Since(m.statusTime) > 3*time.Second {
+			m.statusMsg = ""
+		}
+
+	case replayResultMsg:
+		if msg.success {
+			m.statusMsg = SuccessStyle.Render("✓ ") + msg.message
+		} else {
+			m.statusMsg = ErrorStyle.Render("✗ ") + msg.message
+		}
+		m.statusTime = time.Now()
 	}
 
 	// Update viewport content
-	if len(m.requests) > 0 && m.selected < len(m.requests) {
-		m.viewport.SetContent(m.renderDetail(m.requests[m.selected]))
+	filtered := m.filteredRequests()
+	if len(filtered) > 0 && m.selected < len(filtered) {
+		m.viewport.SetContent(m.renderDetail(filtered[m.selected]))
 	}
 
 	return m, tea.Batch(cmds...)
@@ -254,23 +376,35 @@ func (m Model) renderHeader() string {
 
 func (m Model) renderList() string {
 	header := SectionStyle.Render("REQUESTS")
-	replayHint := DimStyle.Render("[r]eplay")
-	headerLine := header + strings.Repeat(" ", max(0, m.width-lipgloss.Width(header)-lipgloss.Width(replayHint)-6)) + replayHint
+
+	// Show filter or replay hint
+	var rightSide string
+	if m.filterMode {
+		rightSide = DimStyle.Render("filter: ") + lipgloss.NewStyle().Foreground(Sky).Render(m.filterInput) + lipgloss.NewStyle().Foreground(Sky).Blink(true).Render("▎")
+	} else if m.filterInput != "" {
+		rightSide = DimStyle.Render("filter: ") + lipgloss.NewStyle().Foreground(Sky).Render(m.filterInput) + "  " + DimStyle.Render("[esc]clear")
+	} else {
+		rightSide = DimStyle.Render("[r]eplay [/]filter")
+	}
+	headerLine := header + strings.Repeat(" ", max(0, m.width-lipgloss.Width(header)-lipgloss.Width(rightSide)-6)) + rightSide
 
 	var rows []string
 	rows = append(rows, headerLine)
 	rows = append(rows, DimStyle.Render(strings.Repeat("─", m.width-6)))
 
+	filtered := m.filteredRequests()
 	if len(m.requests) == 0 {
 		rows = append(rows, DimStyle.Render("  Waiting for requests..."))
+	} else if len(filtered) == 0 {
+		rows = append(rows, DimStyle.Render("  No matching requests"))
 	} else {
 		// Show up to 8 requests
-		maxRows := min(8, len(m.requests))
+		maxRows := min(8, len(filtered))
 		for i := 0; i < maxRows; i++ {
-			rows = append(rows, m.renderRequestRow(i, m.requests[i]))
+			rows = append(rows, m.renderRequestRow(i, filtered[i]))
 		}
-		if len(m.requests) > maxRows {
-			rows = append(rows, DimStyle.Render(fmt.Sprintf("  ... and %d more", len(m.requests)-maxRows)))
+		if len(filtered) > maxRows {
+			rows = append(rows, DimStyle.Render(fmt.Sprintf("  ... and %d more", len(filtered)-maxRows)))
 		}
 	}
 
@@ -383,8 +517,9 @@ func (m Model) renderDetailBox() string {
 	header := SectionStyle.Render("REQUEST DETAIL")
 	headerLine := header
 
+	filtered := m.filteredRequests()
 	var content string
-	if len(m.requests) > 0 && m.selected < len(m.requests) {
+	if len(filtered) > 0 && m.selected < len(filtered) {
 		content = headerLine + "\n" + DimStyle.Render(strings.Repeat("─", m.width-6)) + "\n" + m.viewport.View()
 	} else {
 		content = headerLine + "\n" + DimStyle.Render(strings.Repeat("─", m.width-6)) + "\n" + DimStyle.Render("  Select a request to view details")
@@ -394,6 +529,12 @@ func (m Model) renderDetailBox() string {
 }
 
 func (m Model) renderHelp() string {
+	if m.statusMsg != "" {
+		return "  " + m.statusMsg
+	}
+	if m.filterMode {
+		return "  " + DimStyle.Render("Type to filter • Enter to confirm • Esc to cancel")
+	}
 	help := "  " + DimStyle.Render("↑↓ navigate  r replay  / filter  q quit")
 	return help
 }

@@ -13,6 +13,7 @@ A self-hostable webhook relay for local development. Forward webhooks from exter
 - **Unique endpoint URLs** - Each tunnel gets its own URL
 - **Request history** - View recent webhooks
 - **Replay webhooks** - Re-send failed requests for debugging
+- **Interactive TUI** - Cute terminal UI with live request stream
 - **Colorized logging** - See requests in real-time
 - **Auth tokens** - Secure private relays
 - **Config file support** - YAML configuration
@@ -102,7 +103,49 @@ Flags:
       --id string       Requested tunnel ID (optional)
       --token string    Auth token for server
   -v, --verbose         Show request/response bodies
+      --tui             Enable interactive TUI mode
 ```
+
+## Interactive TUI Mode
+
+Launch the client with `--tui` for an interactive terminal interface:
+
+```bash
+hookshot client --server https://relay.example.com --tui
+```
+
+```
+╭──────────────────────────────────────────────────────────────────╮
+│  🎯 hookshot                        tunnel: my-project  ● connected │
+│  Public URL: https://relay.example.com/t/my-project                 │
+│  Forwarding: http://localhost:3000                                  │
+├──────────────────────────────────────────────────────────────────│
+│  REQUESTS                                      [r]eplay [/]filter   │
+│  ────────────────────────────────────────────────────────────────   │
+│  ▸ POST   /webhooks/stripe     200  12ms   just now    abc123       │
+│    GET    /api/health          200   3ms   2s ago      def456       │
+│    POST   /webhooks/github     500  45ms   5s ago      ghi789       │
+├──────────────────────────────────────────────────────────────────│
+│  REQUEST DETAIL                                                     │
+│  ────────────────────────────────────────────────────────────────   │
+│  POST /webhooks/stripe                                              │
+│  Content-Type: application/json                                     │
+│  {"event":"payment.success","amount":1000}                          │
+│  Response: 200 (12ms)                                               │
+╰──────────────────────────────────────────────────────────────────╯
+  ↑↓ navigate  r replay  / filter  q quit
+```
+
+### TUI Keybindings
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move selection up |
+| `↓` / `j` | Move selection down |
+| `r` | Replay selected request |
+| `/` | Start filter mode |
+| `Esc` | Clear filter |
+| `q` / `Ctrl+C` | Quit |
 
 ### `hookshot requests`
 
