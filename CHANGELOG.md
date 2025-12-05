@@ -14,6 +14,21 @@
 - Multiple local targets via route-based path matching
 - HTTPS/TLS support for server (`--tls-cert`, `--tls-key`)
 - Verbose mode for request/response body logging (`--verbose`)
+- Config file validation with clear error messages
+- WebSocket origin validation for security
+- Configurable body/message size limits
+
+### Changed
+- Tunnel IDs now use full UUIDs (36 chars) for security; display shows 8-char short form
+- Server always generates tunnel IDs (client-requested IDs ignored)
+- Auth tokens only accepted via Bearer header (removed query string support)
+
+### Fixed
+- Replay API now verifies request belongs to specified tunnel
+- Channel close race condition in tunnel registry
+- WebSocket write errors now logged and handled properly
+- Goroutines now scoped to connection lifetime (no accumulation after reconnects)
+- URL building handles edge cases correctly
 
 ## [0.1.0] - 2025-12-05
 

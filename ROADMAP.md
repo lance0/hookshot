@@ -29,6 +29,23 @@
 - [x] Replay from TUI
 - [x] Search/filter requests
 
+## Phase 4: Security & Reliability Hardening (Complete)
+
+- [x] Full UUID tunnel IDs (36 chars internally, 8-char display)
+- [x] Server-generated IDs only (ignore client requests)
+- [x] Replay API tunnel ownership verification
+- [x] Request body size limits (configurable, default 10MB)
+- [x] WebSocket message size limits
+- [x] WebSocket origin validation
+- [x] Bearer token auth only (removed query string tokens)
+- [x] Graceful server shutdown
+- [x] Channel close race condition fix
+- [x] Thread-safe WebSocket writes
+- [x] Per-connection goroutine lifecycle
+- [x] Proper URL building
+- [x] Config file validation
+- [x] Error context in logs
+
 ## Future Ideas
 
 - [ ] Persistent storage (SQLite) for request history
