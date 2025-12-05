@@ -11,14 +11,14 @@
 - [x] Colorized console logging
 - [x] CLI with server, client, requests, replay commands
 
-## Phase 2: Production Features
+## Phase 2: Production Features (Complete)
 
-- [ ] Auth tokens for private relays
-- [ ] Multiple local targets (route by path)
-- [ ] Config file support
-- [ ] HTTPS/TLS support for server
-- [ ] Request/response body logging (truncated)
-- [ ] Timing information in logs
+- [x] Auth tokens for private relays
+- [x] Multiple local targets (route by path)
+- [x] Config file support (YAML)
+- [x] HTTPS/TLS support for server
+- [x] Request/response body logging (truncated, via --verbose)
+- [x] Timing information in logs
 
 ## Phase 3: TUI & Polish
 

@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- Auth tokens for private relays (`--token` flag)
+- YAML config file support (`--config` or auto-discovered hookshot.yaml)
+- Multiple local targets via route-based path matching
+- HTTPS/TLS support for server (`--tls-cert`, `--tls-key`)
+- Verbose mode for request/response body logging (`--verbose`)
+
+## [0.1.0] - 2025-12-05
+
+### Added
 - Initial release of hookshot
 - Relay server with WebSocket tunnel support
 - Client with auto-reconnect and colorized logging

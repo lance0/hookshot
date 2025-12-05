@@ -4,9 +4,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fatih/color"
 	"github.com/lance0/hookshot/internal/protocol"
+)
+
+const (
+	maxBodyDisplay = 500 // Max chars to display for body
 )
 
 var (
@@ -32,16 +37,18 @@ var (
 	dimColor    = color.New(color.Faint)
 	arrowColor  = color.New(color.FgCyan)
 	idColor     = color.New(color.FgHiBlack)
+	bodyColor   = color.New(color.FgHiBlack)
 )
 
 // Display handles request/response logging
 type Display struct {
-	target string
+	target  string
+	verbose bool
 }
 
 // NewDisplay creates a new display
-func NewDisplay(target string) *Display {
-	return &Display{target: target}
+func NewDisplay(target string, verbose bool) *Display {
+	return &Display{target: target, verbose: verbose}
 }
 
 // LogRequest logs an incoming request
@@ -61,6 +68,11 @@ func (d *Display) LogRequest(req *protocol.HTTPRequest) {
 		req.Path,
 		idColor.Sprintf("(%s)", req.ID),
 	)
+
+	// Show body in verbose mode
+	if d.verbose && len(req.Body) > 0 {
+		d.logBody("   req", req.Body)
+	}
 }
 
 // LogResponse logs a response
@@ -79,6 +91,11 @@ func (d *Display) LogResponse(req *protocol.HTTPRequest, resp *protocol.HTTPResp
 		statusColor.Sprintf("%d", resp.StatusCode),
 		dimColor.Sprintf("(%s)", formatDuration(duration)),
 	)
+
+	// Show body in verbose mode
+	if d.verbose && len(resp.Body) > 0 {
+		d.logBody("   res", resp.Body)
+	}
 }
 
 // LogError logs an error
@@ -127,4 +144,55 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dms", d.Milliseconds())
 	}
 	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+// logBody logs a truncated body with prefix
+func (d *Display) logBody(prefix string, body []byte) {
+	// Only display if it looks like text
+	if !isTextBody(body) {
+		fmt.Printf("%s %s\n", bodyColor.Sprint(prefix), dimColor.Sprintf("[binary %d bytes]", len(body)))
+		return
+	}
+
+	s := string(body)
+	// Clean up for display (single line, truncate)
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\t", " ")
+
+	truncated := false
+	if len(s) > maxBodyDisplay {
+		s = s[:maxBodyDisplay]
+		truncated = true
+	}
+
+	if truncated {
+		fmt.Printf("%s %s%s\n", bodyColor.Sprint(prefix), bodyColor.Sprint(s), dimColor.Sprint("..."))
+	} else {
+		fmt.Printf("%s %s\n", bodyColor.Sprint(prefix), bodyColor.Sprint(s))
+	}
+}
+
+// isTextBody checks if body appears to be text content
+func isTextBody(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	// Check if it's valid UTF-8 and doesn't contain too many control chars
+	if !utf8.Valid(body) {
+		return false
+	}
+	// Sample first 512 bytes
+	sample := body
+	if len(sample) > 512 {
+		sample = sample[:512]
+	}
+	controlChars := 0
+	for _, b := range sample {
+		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+			controlChars++
+		}
+	}
+	// If more than 10% control chars, consider it binary
+	return float64(controlChars)/float64(len(sample)) < 0.1
 }

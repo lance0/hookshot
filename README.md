@@ -14,6 +14,10 @@ A self-hostable webhook relay for local development. Forward webhooks from exter
 - **Request history** - View recent webhooks
 - **Replay webhooks** - Re-send failed requests for debugging
 - **Colorized logging** - See requests in real-time
+- **Auth tokens** - Secure private relays
+- **Config file support** - YAML configuration
+- **Multiple targets** - Route by path to different local services
+- **TLS support** - Native HTTPS for the server
 
 ## Installation
 
@@ -74,10 +78,14 @@ Run the relay server.
 hookshot server [flags]
 
 Flags:
+  -c, --config string     Config file path
   -p, --port int          Port to listen on (default 8080)
       --host string       Host to bind to (default "0.0.0.0")
       --public-url string Public URL for display
       --max-requests int  Max requests to store per tunnel (default 100)
+      --token string      Auth token (required for client connections if set)
+      --tls-cert string   Path to TLS certificate file
+      --tls-key string    Path to TLS key file
 ```
 
 ### `hookshot client`
@@ -88,9 +96,12 @@ Connect to a relay server.
 hookshot client [flags]
 
 Flags:
-  -s, --server string  Server URL (required)
-  -t, --target string  Local target URL (default "http://localhost:3000")
-      --id string      Requested tunnel ID (optional)
+  -c, --config string   Config file path
+  -s, --server string   Server URL (required, or set in config)
+  -t, --target string   Local target URL (default "http://localhost:3000")
+      --id string       Requested tunnel ID (optional)
+      --token string    Auth token for server
+  -v, --verbose         Show request/response bodies
 ```
 
 ### `hookshot requests`
@@ -107,6 +118,38 @@ Replay a previous request.
 
 ```bash
 hookshot replay --server https://relay.example.com --tunnel abc123 --request d08ba939
+```
+
+## Config File
+
+Create `hookshot.yaml` in your current directory or `~/.config/hookshot/config.yaml`:
+
+```yaml
+# Server configuration
+server:
+  port: 8080
+  host: 0.0.0.0
+  public_url: https://relay.example.com
+  token: your-secret-token
+  # tls_cert: /path/to/cert.pem
+  # tls_key: /path/to/key.pem
+
+# Client configuration
+client:
+  server: https://relay.example.com
+  tunnel_id: my-project
+  token: your-secret-token
+  verbose: false
+
+  # Single target
+  target: http://localhost:3000
+
+  # OR multiple targets (route by path)
+  # routes:
+  #   - path: /api
+  #     target: http://localhost:3000
+  #   - path: /webhooks
+  #     target: http://localhost:4000
 ```
 
 ## API Endpoints

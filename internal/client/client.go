@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,11 +18,20 @@ const (
 	pongWait          = 60 * time.Second
 )
 
+// Route maps a path prefix to a target
+type Route struct {
+	Path   string
+	Target string
+}
+
 // Config holds client configuration
 type Config struct {
-	ServerURL  string
-	Target     string
-	TunnelID   string // Optional: requested tunnel ID
+	ServerURL string
+	Target    string  // Default target
+	Routes    []Route // Optional: route by path
+	TunnelID  string  // Optional: requested tunnel ID
+	Token     string  // Optional: auth token
+	Verbose   bool    // Show request/response bodies
 }
 
 // Client is the hookshot tunnel client
@@ -36,11 +46,40 @@ type Client struct {
 
 // New creates a new client
 func New(cfg Config) *Client {
+	var forwarder *Forwarder
+
+	if len(cfg.Routes) > 0 {
+		// Create forwarder with route-based resolution
+		forwarder = NewForwarderWithRoutes(cfg.Target, func(path string) string {
+			return matchRoute(cfg.Routes, cfg.Target, path)
+		})
+	} else {
+		forwarder = NewForwarder(cfg.Target)
+	}
+
 	return &Client{
 		config:    cfg,
-		forwarder: NewForwarder(cfg.Target),
-		display:   NewDisplay(cfg.Target),
+		forwarder: forwarder,
+		display:   NewDisplay(cfg.Target, cfg.Verbose),
 	}
+}
+
+// matchRoute finds the best matching route for a path
+func matchRoute(routes []Route, defaultTarget, path string) string {
+	var bestMatch Route
+	bestLen := -1
+
+	for _, route := range routes {
+		if strings.HasPrefix(path, route.Path) && len(route.Path) > bestLen {
+			bestMatch = route
+			bestLen = len(route.Path)
+		}
+	}
+
+	if bestLen >= 0 {
+		return bestMatch.Target
+	}
+	return defaultTarget
 }
 
 // Run connects to the server and starts forwarding requests
@@ -123,6 +162,7 @@ func (c *Client) connect(ctx context.Context) error {
 	// Send register message
 	regPayload := protocol.RegisterPayload{
 		TunnelID: c.config.TunnelID,
+		Token:    c.config.Token,
 	}
 	msg, _ := protocol.NewMessage(protocol.TypeRegister, regPayload)
 	data, _ := json.Marshal(msg)
@@ -144,6 +184,13 @@ func (c *Client) connect(ctx context.Context) error {
 	if err := json.Unmarshal(message, &respMsg); err != nil {
 		conn.Close()
 		return fmt.Errorf("invalid register response: %w", err)
+	}
+
+	if respMsg.Type == protocol.TypeError {
+		var errPayload protocol.ErrorPayload
+		respMsg.ParsePayload(&errPayload)
+		conn.Close()
+		return fmt.Errorf("server error: %s", errPayload.Message)
 	}
 
 	if respMsg.Type != protocol.TypeRegistered {

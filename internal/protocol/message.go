@@ -26,6 +26,7 @@ type Message struct {
 // RegisterPayload is sent by client to register a tunnel
 type RegisterPayload struct {
 	TunnelID string `json:"tunnel_id,omitempty"` // Optional: client-requested ID
+	Token    string `json:"token,omitempty"`     // Optional: auth token
 }
 
 // RegisteredPayload is sent by server to confirm registration

@@ -21,6 +21,9 @@ type Config struct {
 	Host        string
 	PublicURL   string
 	MaxRequests int
+	Token       string // Optional: require this token for auth
+	TLSCert     string // Optional: path to TLS certificate
+	TLSKey      string // Optional: path to TLS key
 }
 
 // Server is the hookshot relay server
@@ -53,11 +56,16 @@ func (s *Server) Run() error {
 	// WebSocket endpoint for clients
 	r.HandleFunc("/ws", s.handleWebSocket)
 
-	// API endpoints
-	r.HandleFunc("/api/tunnels/{tunnel_id}/requests", s.handleListRequests).Methods("GET")
-	r.HandleFunc("/api/tunnels/{tunnel_id}/requests/{request_id}/replay", s.handleReplay).Methods("POST")
+	// API endpoints (protected by auth if token is set)
+	api := r.PathPrefix("/api").Subrouter()
+	if s.config.Token != "" {
+		api.Use(s.authMiddleware)
+	}
+	api.HandleFunc("/tunnels/{tunnel_id}/requests", s.handleListRequests).Methods("GET")
+	api.HandleFunc("/tunnels/{tunnel_id}/requests/{request_id}/replay", s.handleReplay).Methods("POST")
 
 	// Webhook endpoints - catch all methods and paths under /t/{tunnel_id}
+	// Note: webhooks are NOT auth-protected (external services need to reach them)
 	r.PathPrefix("/t/{tunnel_id}").HandlerFunc(s.handleWebhook)
 
 	// Health check
@@ -67,11 +75,56 @@ func (s *Server) Run() error {
 	})
 
 	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
-	log.Printf("hookshot server listening on %s", addr)
 	if s.config.PublicURL != "" {
 		log.Printf("public URL: %s", s.config.PublicURL)
 	}
+	if s.config.Token != "" {
+		log.Printf("auth token required for connections")
+	}
+
+	// Use TLS if cert and key are provided
+	if s.config.TLSCert != "" && s.config.TLSKey != "" {
+		log.Printf("hookshot server listening on %s (TLS)", addr)
+		return http.ListenAndServeTLS(addr, s.config.TLSCert, s.config.TLSKey, r)
+	}
+
+	log.Printf("hookshot server listening on %s", addr)
 	return http.ListenAndServe(addr, r)
+}
+
+// authMiddleware checks for valid auth token
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.checkAuth(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// checkAuth validates the auth token from Authorization header or query param
+func (s *Server) checkAuth(r *http.Request) bool {
+	if s.config.Token == "" {
+		return true
+	}
+
+	// Check Authorization header (Bearer token)
+	auth := r.Header.Get("Authorization")
+	if auth != "" {
+		if len(auth) > 7 && auth[:7] == "Bearer " {
+			if auth[7:] == s.config.Token {
+				return true
+			}
+		}
+	}
+
+	// Check query param
+	if r.URL.Query().Get("token") == s.config.Token {
+		return true
+	}
+
+	return false
 }
 
 // handleWebSocket handles client WebSocket connections
@@ -100,6 +153,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var regPayload protocol.RegisterPayload
 	if err := msg.ParsePayload(&regPayload); err != nil {
 		log.Printf("failed to parse register payload: %v", err)
+		conn.Close()
+		return
+	}
+
+	// Check auth token if required
+	if s.config.Token != "" && regPayload.Token != s.config.Token {
+		log.Printf("unauthorized connection attempt")
+		errMsg, _ := protocol.NewMessage(protocol.TypeError, protocol.ErrorPayload{
+			Code:    "unauthorized",
+			Message: "invalid or missing auth token",
+		})
+		data, _ := json.Marshal(errMsg)
+		conn.WriteMessage(websocket.TextMessage, data)
 		conn.Close()
 		return
 	}

@@ -11,16 +11,21 @@ import (
 	"github.com/lance0/hookshot/internal/protocol"
 )
 
+// TargetResolver resolves the target URL for a given path
+type TargetResolver func(path string) string
+
 // Forwarder forwards requests to a local target
 type Forwarder struct {
-	target     string
-	httpClient *http.Client
+	defaultTarget  string
+	targetResolver TargetResolver
+	httpClient     *http.Client
 }
 
-// NewForwarder creates a new forwarder
+// NewForwarder creates a new forwarder with a single default target
 func NewForwarder(target string) *Forwarder {
 	return &Forwarder{
-		target: target,
+		defaultTarget:  target,
+		targetResolver: nil,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			// Don't follow redirects automatically
@@ -31,10 +36,35 @@ func NewForwarder(target string) *Forwarder {
 	}
 }
 
+// NewForwarderWithRoutes creates a forwarder with route-based target resolution
+func NewForwarderWithRoutes(defaultTarget string, resolver TargetResolver) *Forwarder {
+	return &Forwarder{
+		defaultTarget:  defaultTarget,
+		targetResolver: resolver,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// resolveTarget gets the target for a path
+func (f *Forwarder) resolveTarget(path string) string {
+	if f.targetResolver != nil {
+		return f.targetResolver(path)
+	}
+	return f.defaultTarget
+}
+
 // Forward forwards a request to the local target and returns the response
 func (f *Forwarder) Forward(ctx context.Context, req *protocol.HTTPRequest) (*protocol.HTTPResponse, error) {
+	// Resolve target based on path
+	target := f.resolveTarget(req.Path)
+
 	// Build the full URL
-	url := f.target + req.Path
+	url := target + req.Path
 
 	// Create the HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, url, bytes.NewReader(req.Body))
